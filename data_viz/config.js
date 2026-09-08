@@ -31,6 +31,13 @@ module.exports = {
     buildingDensity:   { table: 'silver.building_density',  rastCol: 'rast', band: 1, stat: 'mean' },
     population:        { table: 'silver.population',       rastCol: 'rast', band: 1, stat: 'sum' }, // population = sum of a per-pixel count raster
     landcover:         { table: 'silver.landcover',       rastCol: 'rast', band: 1, stat: 'mode' }, // categorical -> majority class
+    // Flood hazard: pixel values are integer classes, 0 = no flooding,
+    // 1-4 = increasing severity (see silver.flood_hazard.class_scheme).
+    // `stat: 'mean'` gives each ward's average severity (e.g. 1.7), which
+    // /api/risk then normalizes against the known 0-4 range and buckets
+    // into quantile classes — this is what now drives the "Risk Map" output
+    // (see routes.js), replacing the old weighted five-raster blend.
+    floodHazard:       { table: 'silver.flood_hazard',     rastCol: 'rast', band: 1, stat: 'mean' },
   },
 
   // Maps raw land cover pixel codes -> the categories your frontend already
@@ -57,14 +64,17 @@ module.exports = {
     90: 'wetlands',
   },
 
-  // Risk model weights — copied from the original synthetic model so results
-  // stay comparable. rainfall/drainage/elevation/slope/buildingDensity are
-  // each min-max normalized across wards (0-1) before this formula is applied.
-  riskWeights: {
-    rainfall: 0.28,
-    drainageDensity: 0.20,
-    inverseElevation: 0.24,
-    inverseSlope: 0.13,
-    buildingDensity: 0.15,
-  },
+  // Flood hazard raster's known fixed value range (see class_scheme on
+  // silver.flood_hazard: 0 = no flooding, 1-4 = increasing severity). Used
+  // to normalize each ward's mean severity to 0..1 for the risk score in
+  // /api/risk. A fixed range (rather than min-max across wards) keeps risk
+  // scores comparable across re-runs even if the set of wards present
+  // changes.
+  floodHazardRange: { min: 0, max: 4 },
+
+  // Risk class quantile cutoffs, applied to wards ranked by risk score
+  // (lowest to highest): bottom 25% Low, next 30% Moderate, next 25% High,
+  // top 20% Severe. Unchanged from the original weighted-blend model, now
+  // applied to flood_hazard-derived scores instead.
+  riskQuantiles: { low: 0.25, moderate: 0.55, high: 0.8 },
 };

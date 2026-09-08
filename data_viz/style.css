@@ -79,7 +79,7 @@ aside{background:var(--panel);flex:0 0 auto;overflow-y:auto;}
 .right-panel{
   position:absolute;
   top:16px;
-  right:16px;
+  right:10px;
   bottom:20px;
   width:320px;
   z-index:10;

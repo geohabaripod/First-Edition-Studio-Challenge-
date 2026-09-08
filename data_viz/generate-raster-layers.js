@@ -1,7 +1,7 @@
 /**
  * One-time build script: renders each physical raster layer (dem, slope,
- * drainageDensity, rainfall, buildingDensity, population, landcover) as a
- * single colorized PNG covering the whole study area.
+ * drainageDensity, rainfall, buildingDensity, population, landcover,
+ * floodHazard) as a single colorized PNG covering the whole study area.
  *
  * IMPORTANT: this deliberately avoids ST_AsPNG / ST_ColorMap / raster
  * ST_Transform, because those route through PostGIS's GDAL raster-export
@@ -12,9 +12,14 @@
  * no GDAL export involved) and do the colorizing + PNG encoding here in
  * Node with `sharp`.
  *
- * "Computed" layers that are ward-level model outputs rather than physical
- * rasters (risk score, population exposed) are NOT included — they stay as
- * ward choropleth fills using zonalStats.js as before.
+ * "Computed" layers that are ward-level model outputs derived FROM a
+ * physical raster (risk score/class, population exposed) are NOT included
+ * here — they stay as ward choropleth fills using zonalStats.js, driven by
+ * /api/risk. floodHazard itself, however, IS a physical raster
+ * (silver.flood_hazard) and IS rendered here, so the frontend's "Risk Map"
+ * fill can show the raw hazard raster instead of (or alongside) the
+ * per-ward classification — see api-data-loader.js's loadRasterOverlays(),
+ * which renames the "floodHazard" key to "risk" for the frontend.
  *
  * Run manually whenever the underlying raster data changes:
  *   node generate-raster-layers.js
@@ -43,6 +48,12 @@ const CONTINUOUS_RAMPS = {
   rainfall:        ['f7fcff', 'd9f0ff', 'a6d8f5', '5fb0e8', '2171b5', '08519c', '08306b'],
   buildingDensity: ['faf7ff', 'e4d9f5', 'c7b5e3', '9b7fe0', '7552b5', '54278f', '32145f'],
   population:      ['fff5f9', 'fde0ec', 'f7b6d2', 'e76f9f', 'c43d7a', 'a50f6b', '6a0055'],
+  // 5 stops for the 5 known hazard classes (0 = no flooding, 1-4 =
+  // increasing severity — see silver.flood_hazard.class_scheme /
+  // config.floodHazardRange). Matches script.js's RISK_COLORS
+  // (Low/Moderate/High/Severe = green/yellow/orange/red), with a pale
+  // neutral tone prepended for class 0 / no-flooding pixels.
+  floodHazard:     ['e8ede9', '3f8f5f', 'e0b23e', 'e17a34', 'c23f3f'],
 };
 
 // Percentile cutoffs used to stretch continuous layers' contrast. Using the
@@ -55,6 +66,18 @@ const CONTINUOUS_RAMPS = {
 //      else into one end of the ramp.
 const STRETCH_LOW_PCT = 2;
 const STRETCH_HIGH_PCT = 98;
+
+// Layers with a known, fixed, meaningful data range use that range directly
+// instead of a percentile stretch — so their PNG coloring lines up with
+// anywhere else in the app that assumes the same fixed range (e.g.
+// /api/risk normalizes flood hazard severity against config.floodHazardRange
+// to compute riskScore/riskClass). A percentile stretch would instead
+// re-scale colors to whatever the actual pixel distribution happens to be
+// in this particular study area, which could visually contradict the
+// ward-level risk classification shown elsewhere.
+const FIXED_RANGES = {
+  floodHazard: { lo: config.floodHazardRange.min, hi: config.floodHazardRange.max },
+};
 
 // Landcover (categorical): category name -> hex color. Keep in sync with
 // LANDCOVER_COLORS in script.js. Raw pixel value -> category name comes
@@ -196,18 +219,24 @@ function computeStretchBounds(pixels, lowPct = STRETCH_LOW_PCT, highPct = STRETC
 
 async function writeContinuousPNG(key, data, outPath) {
   const stops = CONTINUOUS_RAMPS[key];
+  if (!stops) {
+    throw new Error(
+      `No CONTINUOUS_RAMPS entry for "${key}" — add one (array of bare hex strings, no '#') before rendering this layer.`
+    );
+  }
   const { width, height, pixels } = data;
 
   // Stretched bounds drive the color ramp; data.min/data.max (raw
   // ST_SummaryStats values) are kept only for the console diagnostics below.
-  const { lo, hi } = computeStretchBounds(pixels);
+  const { lo, hi } = FIXED_RANGES[key] || computeStretchBounds(pixels);
   const span = hi - lo || 1;
 
+  const rangeSource = FIXED_RANGES[key] ? 'fixed config range' : `stretch p${STRETCH_LOW_PCT}-p${STRETCH_HIGH_PCT}`;
   console.log(
     `  ${key}: raw min/max = ${data.min?.toFixed?.(4) ?? data.min} / ${data.max?.toFixed?.(4) ?? data.max}` +
-    `  |  stretch (p${STRETCH_LOW_PCT}-p${STRETCH_HIGH_PCT}) = ${lo.toFixed(4)} / ${hi.toFixed(4)}`
+    `  |  ${rangeSource} = ${lo.toFixed(4)} / ${hi.toFixed(4)}`
   );
-  if ((data.max - data.min) !== 0 && (data.max - data.min) < (Math.abs(data.max) * 0.01)) {
+  if (!FIXED_RANGES[key] && (data.max - data.min) !== 0 && (data.max - data.min) < (Math.abs(data.max) * 0.01)) {
     console.log(
       `  ${key}: NOTE — raw range is very narrow relative to magnitude (looked flat before). ` +
       `Now stretched using the ${STRETCH_LOW_PCT}-${STRETCH_HIGH_PCT} percentile range so contrast is visible.`

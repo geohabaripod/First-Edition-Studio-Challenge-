@@ -45,6 +45,13 @@ async function loadRealData() {
   const groundTruthGeoJSON = await getJSON('/ground-truth');
   const rasterAll = await getJSON('/raster-all').catch(() => ({})); // Fallback if raster route is loading
   const risk = await getJSON('/risk').catch(() => []);              // Fallback if risk route is loading
+  // Catchment summary — wards-mapped count and per-ward population, sourced
+  // from gold.grid_cell on Supabase (see server-side routes.js). This is a
+  // separate live database from everything else the API queries, so it's
+  // fetched independently and falls back gracefully if unreachable.
+  const catchmentSummary = await getJSON('/catchment-summary').catch(() => ({
+    wardsMapped: null, totalPopulation: null, populationByWard: {},
+  }));
 
   const riskByWard = new Map((risk || []).map((r) => [String(r.ward_id), r]));
 
@@ -58,6 +65,17 @@ async function loadRealData() {
     const [lon, lat] = lonLatCentroid(f.geometry);
     const r = riskByWard.get(id) || {};
 
+    // Population now comes from gold.grid_cell (Supabase) per ward, summed
+    // server-side in /api/catchment-summary and /api/risk. Falls back to
+    // the silver.population raster's zonal sum if a ward has no grid_cell
+    // coverage (e.g. catchment-summary fetch failed, or that ward simply
+    // isn't present in grid_cell yet), so a ward never silently shows 0
+    // population just because one data source is unavailable.
+    const gridCellPopulation = catchmentSummary.populationByWard?.[id];
+    const population = gridCellPopulation != null
+      ? Math.round(gridCellPopulation)
+      : Math.round(rasterAll.population?.[id] ?? 0);
+
     return {
       id,
       name,
@@ -67,7 +85,7 @@ async function loadRealData() {
       drainageDensity: rasterAll.drainageDensity?.[id] ?? 0,
       buildingDensity: rasterAll.buildingDensity?.[id] ?? 0,
       rainfall: rasterAll.rainfall?.[id] ?? 0,
-      population: Math.round(rasterAll.population?.[id] ?? 0),
+      population,
       landcover: rasterAll.landcover?.[id] ?? 'bare',
       riskScore: r.riskScore ?? 0,
       riskClass: r.riskClass ?? 'Low',
@@ -91,7 +109,13 @@ async function loadRealData() {
     if (best) best.gtPoints.push(pt);
   });
 
-  return { wards, wardsGeoJSON, groundTruthGeoJSON };
+  // Wards-mapped count for the "Wards mapped" stat card — prefers the
+  // grid_cell-derived count (distinct ward_id in gold.grid_cell) per the
+  // catchment-summary requirement; falls back to the number of ward
+  // polygons actually loaded if catchment-summary is unavailable.
+  const wardsMappedCount = catchmentSummary.wardsMapped ?? wards.length;
+
+  return { wards, wardsGeoJSON, groundTruthGeoJSON, wardsMappedCount };
 }
 
 /* ------------------------------------------------------------------ */
@@ -122,17 +146,25 @@ async function loadStaticLayers() {
 
 /**
  * Physical raster layers (dem, slope, drainageDensity, rainfall,
- * buildingDensity, population, landcover) — pre-rendered whole-study-area
- * colorized PNGs, see generate-raster-layers.js. Each has its own bounds
- * (the true raster envelope), unlike the static vector layers which all
- * share one bounds rectangle.
+ * buildingDensity, population, landcover, floodHazard) — pre-rendered
+ * whole-study-area colorized PNGs, see generate-raster-layers.js. Each has
+ * its own bounds (the true raster envelope), unlike the static vector
+ * layers which all share one bounds rectangle.
+ *
+ * NOTE: the backend/build script produces this under the key "floodHazard"
+ * (matches config.raster.floodHazard / silver.flood_hazard), but the
+ * frontend's fill-layer selector calls this layer "risk" (FILL_DEFS.risk,
+ * RASTER_BACKED_KEYS in script.js) — rename it here so
+ * rasterOverlayLayers.risk resolves to this PNG once state.fillLayer is
+ * 'risk'. Every other key passes through unchanged.
  */
 async function loadRasterOverlays() {
   const bounds = await fetch(`${STATIC_BASE}/raster/bounds.json`).then((r) => r.json());
   const layers = {};
   Object.keys(bounds).forEach((key) => {
     const b = bounds[key];
-    layers[key] = {
+    const outKey = key === 'floodHazard' ? 'risk' : key;
+    layers[outKey] = {
       url: `${STATIC_BASE}/raster/${key}.png`,
       bounds: [[b.minLat, b.minLon], [b.maxLat, b.maxLon]],
     };

@@ -49,7 +49,7 @@ const LANDCOVER_LABELS = {
 const FILL_DEFS = {
   dem:        {label:"DEM (Elevation)", unit:"m a.s.l. (norm.)", type:"gradient", stops:['#f5e6c8','#d8c28f','#a6b86a','#5f8f5b','#3d6f62','#274b6b'], get:w=>w.elevation, min:"Low",max:"High"},
   slope:      {label:"Slope", unit:"degrees (norm.)", type:"gradient", stops:['#f7f7f7','#d9ead3','#b6d7a8','#f6d365','#e89b3c','#a85d2a','#663c24'], get:w=>w.slope, min:"Flat",max:"Steep"},
-  drainageDensity:{label:"Drainage Density", unit:"km/km² (norm.)", type:"gradient", stops:['#f1fbfa','#c7eeeb','#8bd8d2','#4fbdb7','#159a9c','#087f8c','#064c59'], get:w=>w.drainageDensity, min:"Sparse",max:"Dense"},
+  drainageDensity:{label:"Drainage Distance", unit:"km/km² (norm.)", type:"gradient", stops:['#f1fbfa','#c7eeeb','#8bd8d2','#4fbdb7','#159a9c','#087f8c','#064c59'], get:w=>w.drainageDensity, min:"Sparse",max:"Dense"},
   rainfall:   {label:"Rainfall", unit:"annual total (norm.)", type:"gradient", stops:['#f7fcff','#d9f0ff','#a6d8f5','#5fb0e8','#2171b5','#08519c','#08306b'], get:w=>w.rainfall, min:"Low",max:"High"},
   buildingDensity:{label:"Building Density", unit:"units/ha (norm.)", type:"gradient", stops:['#faf7ff','#e4d9f5','#c7b5e3','#9b7fe0','#7552b5','#54278f','#32145f'], get:w=>w.buildingDensity, min:"Low",max:"High"},
   population: {label:"Population", unit:"persons (norm.)", type:"gradient", stops:['#fff5f9','#fde0ec','#f7b6d2','#e76f9f','#c43d7a','#a50f6b','#6a0055'], get:w=>w.population, min:"Low",max:"High", raw:w=>w.population},
@@ -87,6 +87,167 @@ function colorForWard(varKey, w){
     return rampMulti(def.stops, t);
   }
   return def.cats[def.get(w)] || '#22343a';
+}
+
+/* ============================================================
+   4b. WARD LABEL POINT — "pole of inaccessibility"
+   ------------------------------------------------------------
+   Neither layer.getBounds().getCenter() (bbox center) nor an
+   area-weighted centroid ("center of mass") are guaranteed to fall
+   INSIDE a polygon — both can land outside for concave, L-shaped, or
+   narrow-waisted wards, which is exactly the "values outside the ward"
+   symptom being fixed here.
+
+   The correct tool for label placement is the point that is as far as
+   possible from every edge of the polygon (its "pole of inaccessibility",
+   the same technique Mapbox's polylabel uses for map labels). By
+   construction this point must be inside the polygon (its distance to
+   every edge is positive), so it can never land outside — the guarantee
+   a centroid can't offer.
+
+   This is a quadtree best-first search: start with a coarse grid of
+   candidate cells covering the polygon's bounding box, repeatedly expand
+   whichever cell could *possibly* contain a better answer than what's
+   already been found (bounded by cell.d + cell.h*sqrt(2)), and discard
+   the rest. It converges to within `precision` of the true optimum.
+============================================================ */
+
+/** Squared distance from point (px,py) to the segment (x1,y1)-(x2,y2). */
+function pointToSegDistSq(px, py, x1, y1, x2, y2){
+  let x = x1, y = y1, dx = x2 - x1, dy = y2 - y1;
+  if(dx !== 0 || dy !== 0){
+    const t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy);
+    if(t > 1){ x = x2; y = y2; }
+    else if(t > 0){ x += dx * t; y += dy * t; }
+  }
+  dx = px - x; dy = py - y;
+  return dx * dx + dy * dy;
+}
+
+/**
+ * Signed distance from (x,y) to the polygon boundary defined by `rings`
+ * (outer ring + any hole rings, GeoJSON-style). Positive = inside,
+ * negative = outside. Inside/outside uses the standard even-odd ray-cast
+ * rule, which correctly handles holes when they're included in `rings`.
+ */
+function pointToPolygonDist(x, y, rings){
+  let inside = false;
+  let minDistSq = Infinity;
+  for(const ring of rings){
+    for(let i = 0, len = ring.length, j = len - 1; i < len; j = i++){
+      const a = ring[i], b = ring[j];
+      if((a[1] > y) !== (b[1] > y) &&
+         (x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0])) inside = !inside;
+      minDistSq = Math.min(minDistSq, pointToSegDistSq(x, y, a[0], a[1], b[0], b[1]));
+    }
+  }
+  return (inside ? 1 : -1) * Math.sqrt(minDistSq);
+}
+
+/** Area-weighted centroid of a ring, used only as a seed candidate below. */
+function ringCentroid(ring){
+  const n = ring.length - 1;
+  let area = 0, cx = 0, cy = 0;
+  for(let i = 0; i < n; i++){
+    const [x0, y0] = ring[i];
+    const [x1, y1] = ring[i + 1];
+    const cross = x0 * y1 - x1 * y0;
+    area += cross;
+    cx += (x0 + x1) * cross;
+    cy += (y0 + y1) * cross;
+  }
+  area *= 0.5;
+  if(Math.abs(area) < 1e-12){
+    let sx = 0, sy = 0;
+    for(let i = 0; i < n; i++){ sx += ring[i][0]; sy += ring[i][1]; }
+    return [sx / n, sy / n];
+  }
+  return [cx / (6 * area), cy / (6 * area)];
+}
+
+/**
+ * Pole of inaccessibility for a single polygon part (rings = [outerRing,
+ * ...holeRings]). Returns [x, y, distanceToBoundary].
+ */
+function polylabel(rings){
+  const outer = rings[0];
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for(const [x, y] of outer){
+    if(x < minX) minX = x; if(x > maxX) maxX = x;
+    if(y < minY) minY = y; if(y > maxY) maxY = y;
+  }
+  const width = maxX - minX, height = maxY - minY;
+  const cellSize = Math.min(width, height);
+  if(cellSize <= 0) return [minX, minY, 0];
+
+  // Precision scaled to the polygon's own size rather than a fixed
+  // absolute value — lon/lat degrees span a huge range of ward sizes here.
+  const precision = cellSize * 0.005;
+
+  let h = cellSize / 2;
+  const makeCell = (x, y, h) => {
+    const d = pointToPolygonDist(x, y, rings);
+    return { x, y, h, d, max: d + h * Math.SQRT2 };
+  };
+
+  let queue = [];
+  for(let x = minX; x < maxX; x += cellSize){
+    for(let y = minY; y < maxY; y += cellSize){
+      queue.push(makeCell(x + h, y + h, h));
+    }
+  }
+
+  // Seed with the area centroid and the plain bbox center — often close
+  // to optimal already, so this tends to speed up convergence.
+  const [cx, cy] = ringCentroid(outer);
+  let best = makeCell(cx, cy, 0);
+  const bboxCandidate = makeCell(minX + width / 2, minY + height / 2, 0);
+  if(bboxCandidate.d > best.d) best = bboxCandidate;
+
+  let guard = 0;
+  while(queue.length && guard++ < 5000){
+    // Best-first: process the cell with the highest upper-bound potential.
+    queue.sort((a, b) => a.max - b.max);
+    const cell = queue.pop();
+    if(cell.d > best.d) best = cell;
+    if(cell.max - best.d <= precision) continue; // can't beat the current best — drop it
+    const half = cell.h / 2;
+    queue.push(makeCell(cell.x - half, cell.y - half, half));
+    queue.push(makeCell(cell.x + half, cell.y - half, half));
+    queue.push(makeCell(cell.x - half, cell.y + half, half));
+    queue.push(makeCell(cell.x + half, cell.y + half, half));
+  }
+  return [best.x, best.y, best.d];
+}
+
+/**
+ * Best label point for a GeoJSON Polygon or MultiPolygon, in [lon, lat]
+ * order. For MultiPolygon, computes polylabel independently per part and
+ * keeps the one with the largest distance-to-boundary — i.e. the most
+ * "roomy" part, typically the largest, rather than a small disconnected
+ * sliver.
+ */
+function wardLabelPoint(geometry){
+  if(!geometry) return null;
+  if(geometry.type === 'Polygon'){
+    const [x, y] = polylabel(geometry.coordinates);
+    return [x, y];
+  }
+  if(geometry.type === 'MultiPolygon'){
+    let best = null;
+    geometry.coordinates.forEach((rings) => {
+      const [x, y, d] = polylabel(rings);
+      if(!best || d > best[2]) best = [x, y, d];
+    });
+    return best ? [best[0], best[1]] : null;
+  }
+  return null;
+}
+
+/** Leaflet LatLng version of wardLabelPoint(), for direct use with L.marker etc. */
+function wardCentroidLatLng(geometry){
+  const p = wardLabelPoint(geometry);
+  return p ? L.latLng(p[1], p[0]) : null;
 }
 
 /* ============================================================
@@ -276,6 +437,7 @@ let wards = [];
 let wardsById = new Map();
 let wardsGeoJSON = null;
 let wardsLayer = null;
+let wardsMappedCount = 0;
 const wardLayerById = new Map();
 
 let compareLayerGroup = null;
@@ -289,9 +451,13 @@ const staticOverlayLayers = {};
 // state.fillLayer is ever shown (see renderMap()).
 const rasterOverlayLayers = {};
 // risk/popExposed are ward-level computed model outputs, not physical
-// rasters, so they keep the ward-choropleth rendering. Everything else in
-// FILL_DEFS is backed by a real raster PNG.
-const RASTER_BACKED_KEYS = new Set(['dem','slope','drainageDensity','rainfall','buildingDensity','population','landcover']);
+// rasters, so they default to ward-choropleth rendering. 'risk' is listed
+// here too since it CAN be raster-backed once the backend supplies a
+// silver.flood_hazard PNG via loadRasterOverlays() — but applyWardStyle()
+// only actually switches a key into raster mode once rasterOverlayLayers
+// has a real entry for it, so listing a key here alone does not hide the
+// ward fill if that PNG hasn't loaded (avoids a blank map).
+const RASTER_BACKED_KEYS = new Set(['dem','slope','drainageDensity','rainfall','buildingDensity','population','landcover','risk']);
 const popExposedLabelsGroup = (typeof L !== 'undefined') ? L.layerGroup() : null;
 
 function toggleLayer(layer, on){
@@ -302,7 +468,14 @@ function toggleLayer(layer, on){
 
 function applyWardStyle(layer, id){
   const w = wardsById.get(id);
-  const isRasterBacked = RASTER_BACKED_KEYS.has(state.fillLayer);
+  // A key only renders as a raster overlay if that overlay actually loaded
+  // (i.e. the backend returned it from loadRasterOverlays()). Checking
+  // RASTER_BACKED_KEYS alone isn't enough — 'risk' is listed there once the
+  // silver.flood_hazard raster is wired up backend-side, but until that
+  // PNG actually exists in rasterOverlayLayers, falling through to "raster
+  // mode" would just hide the ward fill with nothing to replace it (blank
+  // map). Falling back to the ward choropleth keeps something visible.
+  const isRasterBacked = RASTER_BACKED_KEYS.has(state.fillLayer) && !!rasterOverlayLayers[state.fillLayer];
   layer.setStyle({
     className: 'ward-poly',
     stroke: false,
@@ -397,7 +570,11 @@ function renderMap(){
         const id = String(layer.feature.properties.id);
         const w = wardsById.get(id);
         if(!w) return;
-        const center = layer.getBounds().getCenter();
+        // True polygon centroid (area-weighted "center of mass"), not the
+        // bounding-box center — see the WARD CENTROID HELPER section above.
+        // Falls back to the bbox center only if centroid computation
+        // somehow fails (e.g. malformed geometry).
+        const center = wardCentroidLatLng(layer.feature.geometry) || layer.getBounds().getCenter();
         const icon = L.divIcon({ className:'ward-value-label', html: formatCount(w.popExposed), iconSize:[0,0] });
         L.marker(center, { icon, interactive:false, pane:'wardsPane' }).addTo(popExposedLabelsGroup);
       });
@@ -531,7 +708,7 @@ function renderStats(){
   const totalExposed = wards.reduce((s,w)=>s+w.popExposed,0);
 
   document.getElementById('statGrid').innerHTML = `
-    <div class="stat-card"><div class="val">${wards.length}</div><div class="lab">Wards mapped</div></div>
+    <div class="stat-card"><div class="val">${wardsMappedCount || wards.length}</div><div class="lab">Wards mapped</div></div>
     <div class="stat-card"><div class="val">${(totalPop/1000).toFixed(1)}k</div><div class="lab">Population</div></div>
     <div class="stat-card"><div class="val">${pctHighSevere}%</div><div class="lab">Area high+ risk</div></div>
     <div class="stat-card"><div class="val">${(totalExposed/1000).toFixed(1)}k</div><div class="lab">Pop. exposed</div></div>
@@ -635,8 +812,9 @@ async function loadRasterOverlaysLayer(){
 async function loadWardLayer(){
   const data = await window.FloodDataAPI.loadRealData();
   wards = data.wards;
-  wardsById = new Map(wards.map(w => [w.id, w]));
+  wardsById = new Map(wards.map(w => [String(w.id), w]));
   wardsGeoJSON = data.wardsGeoJSON;
+  wardsMappedCount = data.wardsMappedCount;
   computeFillRanges(wards); // must run before any renderMap()/colorForWard() call
 
   wardsLayer = L.geoJSON(wardsGeoJSON, {
