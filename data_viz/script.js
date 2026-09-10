@@ -1,5 +1,5 @@
 /* ============================================================
-   4. COLOR SCALES
+   COLOR SCALES
 ============================================================ */
 function lerp(a,b,t){return a+(b-a)*t;}
 function hexToRgb(h){h=h.replace('#','');return [parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)];}
@@ -90,7 +90,7 @@ function colorForWard(varKey, w){
 }
 
 /* ============================================================
-   4b. WARD LABEL POINT — "pole of inaccessibility"
+    WARD LABEL POINT — "pole of inaccessibility"
    ------------------------------------------------------------
    Neither layer.getBounds().getCenter() (bbox center) nor an
    area-weighted centroid ("center of mass") are guaranteed to fall
@@ -251,7 +251,7 @@ function wardCentroidLatLng(geometry){
 }
 
 /* ============================================================
-   5. STATE
+   STATE
 ============================================================ */
 let state = {
   fillLayer:'risk',
@@ -265,7 +265,7 @@ let state = {
 };
 
 /* ============================================================
-   6. BUILD SIDEBAR CONTROLS
+   BUILD SIDEBAR CONTROLS
 ============================================================ */
 const GENERAL_LAYERS = [
   {key:'studyArea', label:'Study Area (Boundary)', color:'#f2f2f2'},
@@ -359,7 +359,7 @@ document.getElementById('opacitySlider').addEventListener('input',e=>{
 });
 
 /* ============================================================
-   7. LEAFLET MAP — wards are a native Leaflet layer (choropleth,
+   LEAFLET MAP — wards are a native Leaflet layer (choropleth,
    interactive). Study area / roads / rivers / buildings are static,
    pre-rendered PNGs (see generate-static-layers.js) shown as
    L.imageOverlay — cheap to pan/zoom since there's nothing to
@@ -602,7 +602,7 @@ function renderMap(){
 }
 
 /* ============================================================
-   8b. HOVER TOOLTIP
+   HOVER TOOLTIP
 ============================================================ */
 const tooltipEl = document.getElementById('mapTooltip');
 const stageEl = document.querySelector('.map-stage');
@@ -657,7 +657,7 @@ function selectWard(id){
 }
 
 /* ============================================================
-   8. SWIPE HANDLE
+   SWIPE HANDLE
 ============================================================ */
 const grip = document.getElementById('swipeGrip');
 const handle = document.getElementById('swipeHandle');
@@ -678,7 +678,7 @@ function updateSwipePos(){
 }
 
 /* ============================================================
-   9. LEGEND
+   LEGEND
 ============================================================ */
 function renderLegend(){
   const def = FILL_DEFS[state.fillLayer];
@@ -698,7 +698,7 @@ function renderLegend(){
 }
 
 /* ============================================================
-   10. STATS PANEL
+   STATS PANEL
 ============================================================ */
 function renderStats(){
   if(!wards.length) return; // no ward data loaded — nothing to summarize
@@ -751,7 +751,7 @@ function renderStats(){
 }
 
 /* ============================================================
-   11. WARD DETAIL
+   WARD DETAIL
 ============================================================ */
 function renderWardDetail(id){
   const w = wards.find(x=>x.id===id);
@@ -773,7 +773,7 @@ function renderWardDetail(id){
 }
 
 /* ============================================================
-   12. INIT
+   INIT
 ============================================================ */
 
 /**
