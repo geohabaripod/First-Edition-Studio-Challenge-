@@ -36,7 +36,7 @@ const PAD_PCT = 0.03;      // 3% padding around the true data extent, so
 // Colors match the existing swatches in script.js (GENERAL_LAYERS) so the
 // static image looks the same as the vector version it replaces.
 const STATIC_LAYERS = {
-  studyArea: { vectorKey: 'studyArea', stroke: '#f2f2f2', strokeWidth: 3,   fill: 'none' },
+  studyArea: { vectorKey: 'studyArea', stroke: '#000000', strokeWidth: 3,   fill: 'none' },
   roads:     { vectorKey: 'roads',     stroke: '#000000', strokeWidth: 1.2, fill: 'none' },
   rivers:    { vectorKey: 'rivers',    stroke: '#4fa9d6', strokeWidth: 2.2, fill: 'none' },
   buildings: { vectorKey: 'buildings', stroke: 'none',    strokeWidth: 0,   fill: '#f4ede1', fillOpacity: 1 },
