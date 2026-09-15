@@ -2,7 +2,7 @@ const express = require('express');
 const { query } = require('./db');
 const { query: supabaseQuery } = require('./supabaseDb');
 const config = require('./config');
-const { zonalStatsForLayer } = require('./zonalStats');
+const { zonalStatsForLayer, normalize } = require('./zonalStats');
 
 const router = express.Router();
 
@@ -171,14 +171,34 @@ router.get('/raster-all', async (req, res, next) => {
 /* treating "ward id" as the silver.boundaries id without knowing       */
 /* about the Supabase side at all.                                      */
 /*                                                                      */
+/* NAME MATCHING IS NORMALIZED (trim + lowercase + collapse internal    */
+/* whitespace) via normalizeWardName() below, rather than comparing raw */
+/* strings. The two databases can disagree on case or spacing ("Kasarani */
+/* " vs "kasarani") for what is otherwise the same ward, and a raw      */
+/* string comparison would silently treat those as non-matches, sending */
+/* every affected ward's population — and therefore its computed        */
+/* popExposed in /risk below — to 0. If a ward is STILL unmatched after */
+/* normalization, that means the names genuinely differ (e.g. an        */
+/* abbreviation or a renamed ward), which needs an explicit alias        */
+/* mapping rather than more normalization.                              */
+/*                                                                      */
 /* grid_cell has no risk fields populated (risk_category_id/risk_score  */
 /* are null across every row as of this writing), so it's used ONLY as  */
 /* the population source here — population per ward, summed across all  */
-/* grid cells whose ward_id matches. Risk still comes from flood_hazard */
-/* below. Nulls in grid_cell.population (uninhabited cells — water,     */
-/* bare ground, etc.) are treated as 0 via COALESCE/SUM's natural       */
-/* null-skipping behavior.                                               */
+/* grid cells whose ward_id matches. Risk comes from flood_hazard below. */
+/* Nulls in grid_cell.population (uninhabited cells — water, bare        */
+/* ground, etc.) are treated as 0 via COALESCE/SUM's natural null-       */
+/* skipping behavior.                                                    */
 /* ------------------------------------------------------------------ */
+
+/** Normalizes a ward name for cross-database matching: trims, lowercases,
+ * and collapses internal whitespace runs to a single space. Both sides of
+ * the join (silver.boundaries.ward_name and gold.lu_ward.ward_name) get
+ * run through this before comparing, so "Kasarani ", "kasarani", and
+ * "Kasarani" all match even though they're not byte-identical. */
+function normalizeWardName(name) {
+  return String(name ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
 
 /** silver.boundaries.id (string) -> ward_name */
 async function getWardNameById() {
@@ -188,7 +208,7 @@ async function getWardNameById() {
   return new Map(rows.map((r) => [String(r.id), r.name]));
 }
 
-/** gold.lu_ward.ward_name -> summed population from gold.grid_cell */
+/** normalized ward_name -> summed population from gold.grid_cell */
 async function getPopulationByWardName() {
   const sql = `
     SELECT lw.ward_name, COALESCE(SUM(gc.population), 0) AS population
@@ -198,15 +218,20 @@ async function getPopulationByWardName() {
     GROUP BY lw.ward_name
   `;
   const { rows } = await supabaseQuery(sql);
-  return new Map(rows.map((r) => [r.ward_name, Number(r.population)]));
+  const map = new Map();
+  rows.forEach((r) => {
+    map.set(normalizeWardName(r.ward_name), Number(r.population));
+  });
+  return map;
 }
 
 /**
  * Returns Map<String(silver.boundaries.id), population>, bridging the two
- * database's ID schemes via ward name (see comment block above). Wards
- * present in silver.boundaries but with no matching name on the Supabase
- * side get population 0 rather than being silently dropped, so every
- * ward the frontend knows about still gets an entry.
+ * database's ID schemes via NORMALIZED ward name (see normalizeWardName
+ * and the comment block above). Wards present in silver.boundaries but
+ * with no matching normalized name on the Supabase side get population 0
+ * rather than being silently dropped, so every ward the frontend knows
+ * about still gets an entry.
  */
 async function getPopulationByWard() {
   const [nameById, populationByName] = await Promise.all([
@@ -217,8 +242,9 @@ async function getPopulationByWard() {
   const result = new Map();
   const unmatched = [];
   nameById.forEach((name, id) => {
-    if (populationByName.has(name)) {
-      result.set(id, populationByName.get(name));
+    const key = normalizeWardName(name);
+    if (populationByName.has(key)) {
+      result.set(id, populationByName.get(key));
     } else {
       result.set(id, 0);
       unmatched.push(name);
@@ -228,7 +254,7 @@ async function getPopulationByWard() {
   if (unmatched.length) {
     console.warn(
       `[getPopulationByWard] ${unmatched.length} ward(s) in ${config.vector.wards.table} had no ` +
-      `name match in gold.lu_ward, population defaulted to 0: ${unmatched.join(', ')}`
+      `normalized name match in gold.lu_ward, population defaulted to 0: ${unmatched.join(', ')}`
     );
   }
 
@@ -250,36 +276,40 @@ router.get('/catchment-summary', async (req, res, next) => {
 /* ------------------------------------------------------------------ */
 /* Computed layer — risk score & population exposed                    */
 /*                                                                      */
-/* Risk score/class derive from silver.flood_hazard (a raster of        */
-/* integer severity classes 0-4 — see class_scheme on that table).      */
-/* Each ward's mean severity is normalized against the raster's known    */
-/* 0-4 range, then wards are bucketed into Low/Moderate/High/Severe by   */
-/* the 25/30/25/20% quantile split in config.riskQuantiles. Population   */
-/* (and therefore population exposed) comes from gold.grid_cell on       */
-/* Supabase via getPopulationByWard() above, which already returns a     */
-/* Map keyed by silver.boundaries id (bridged through ward name), so no  */
-/* further id translation is needed here — both hazardMean (from         */
-/* zonalStatsForLayer, keyed by silver.boundaries id) and                */
-/* populationByWard now share the same id space.                         */
+/* CHANGED: risk now derives from the silver.flood_hazard raster        */
+/* (config.raster.floodHazard) instead of the old five-raster weighted  */
+/* blend (rainfall/drainageDensity/dem/slope/buildingDensity via        */
+/* config.riskWeights). That config key no longer exists — config.js    */
+/* now ships floodHazardRange (the raster's fixed 0-4 severity scale)   */
+/* and riskQuantiles (the Low/Moderate/High/Severe cutoffs) instead,    */
+/* per the comments on config.raster.floodHazard. This route previously */
+/* still referenced the removed config.riskWeights, which is why it     */
+/* 500'd with "Cannot read properties of undefined (reading 'rainfall')" */
+/* — w was undefined.                                                    */
+/*                                                                      */
+/* Population source is unchanged: gold.grid_cell via getPopulationByWard() */
+/* above, keyed by String(silver.boundaries.id).                        */
 /* ------------------------------------------------------------------ */
 
 router.get('/risk', async (req, res, next) => {
   try {
-    const [hazardMean, populationByWard] = await Promise.all([
+    const [hazard, populationByWard] = await Promise.all([
       zonalStatsForLayer('floodHazard'),
       getPopulationByWard(),
     ]);
 
-    const { min: hazardMin, max: hazardMax } = config.floodHazardRange;
-    const hazardSpan = hazardMax - hazardMin || 1;
-
+    // Normalize each ward's mean severity (0-4 fixed scale, not min/max
+    // across wards — see config.floodHazardRange comment) to 0..1.
+    const { min, max } = config.floodHazardRange;
     const riskScores = new Map();
-    hazardMean.forEach((meanVal, wardId) => {
-      const id = String(wardId); // normalize to match populationByWard's string keys
-      const t = (meanVal - hazardMin) / hazardSpan;
+    hazard.forEach((value, id) => {
+      const t = (value - min) / (max - min);
       riskScores.set(id, Math.max(0, Math.min(1, t)));
     });
 
+    // Quantile risk class from config.riskQuantiles (bottom `low` -> Low,
+    // next up to `moderate` -> Moderate, next up to `high` -> High, rest
+    // -> Severe), applied to wards ranked by risk score lowest to highest.
     const { low, moderate, high } = config.riskQuantiles;
     const sorted = [...riskScores.entries()].sort((a, b) => a[1] - b[1]);
     const n = sorted.length;
@@ -291,7 +321,7 @@ router.get('/risk', async (req, res, next) => {
 
     const wardIds = [...riskScores.keys()];
     const out = wardIds.map((id) => {
-      const population = populationByWard.get(id) ?? 0;
+      const population = populationByWard.get(String(id)) ?? 0;
       const riskScore = riskScores.get(id);
       return {
         ward_id: id,
