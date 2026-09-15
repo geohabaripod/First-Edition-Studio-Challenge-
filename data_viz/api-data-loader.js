@@ -12,7 +12,7 @@
 const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 const API_ROOT = isLocal
   ? 'http://localhost:4000'
-  : 'https://geohabaripod-first-edition-studio-zaqz.onrender.com';
+  : 'https://floodsusceptibilitymap.onrender.com/';
 
 const API_BASE = `${API_ROOT}/api`; // Express server port — must match server.js app.listen() + app.use() prefix
 const STATIC_BASE = `${API_ROOT}/static/generated`; // served directly by server.js (not through /api)
