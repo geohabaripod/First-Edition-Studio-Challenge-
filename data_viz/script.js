@@ -1,5 +1,5 @@
 /* ============================================================
-   COLOR SCALES
+  COLOR SCALES
 ============================================================ */
 function lerp(a,b,t){return a+(b-a)*t;}
 function hexToRgb(h){h=h.replace('#','');return [parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)];}
@@ -90,7 +90,7 @@ function colorForWard(varKey, w){
 }
 
 /* ============================================================
-    WARD LABEL POINT — "pole of inaccessibility"
+   WARD LABEL POINT — "pole of inaccessibility"
    ------------------------------------------------------------
    Neither layer.getBounds().getCenter() (bbox center) nor an
    area-weighted centroid ("center of mass") are guaranteed to fall
@@ -268,8 +268,8 @@ let state = {
    BUILD SIDEBAR CONTROLS
 ============================================================ */
 const GENERAL_LAYERS = [
-  {key:'studyArea', label:'Study Area (Boundary)', color:'#f2f2f2'},
-  {key:'wardBoundaries', label:'Ward Boundaries', color:'#8fb0ac'},
+  {key:'studyArea', label:'Study Area (Boundary)', color:'#000000'},
+  {key:'wardBoundaries', label:'Ward Boundaries', color:'#000000'},
   {key:'roads', label:'Roads', color:'#000000'},
   {key:'buildings', label:'Buildings', color:'#f4ede1'},
 ];
@@ -379,7 +379,7 @@ function initMap(){
   }
 
   map = L.map('mapBg', {
-    zoomControl: true,
+    zoomControl: false,       // CHANGED: was true — replaced with a manually positioned control below
     dragging: true,
     scrollWheelZoom: true,
     doubleClickZoom: true,
@@ -391,6 +391,9 @@ function initMap(){
     zoomDelta: 0.125,         // +/- buttons and keyboard zoom move by 0.25 levels
     wheelPxPerZoomLevel: 120
   }).setView([-1.10, 36.95], 13); // re-centered on the real study area once data loads
+
+  // NEW: zoom control moved to the right side (was default top-left)
+  L.control.zoom({ position: 'topright' }).addTo(map);
 
   baseLayers.streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap contributors',
@@ -602,7 +605,7 @@ function renderMap(){
 }
 
 /* ============================================================
-   HOVER TOOLTIP
+  HOVER TOOLTIP
 ============================================================ */
 const tooltipEl = document.getElementById('mapTooltip');
 const stageEl = document.querySelector('.map-stage');
@@ -618,7 +621,7 @@ function showTooltip(w){
     <div class="tt-name">${w.name}</div>
     <div class="tt-sub">WARD ${w.id} · RISK <span class="tt-chip" style="background:${RISK_COLORS[w.riskClass]}">${w.riskClass}</span></div>
     <div class="tt-row"><span class="k">Population</span><span class="v">${w.population.toLocaleString()}</span></div>
-    <div class="tt-row hl"><span class="k">Population exposed</span><span class="v">${w.popExposed.toLocaleString()} (${Math.round(w.riskScore*100)}%)</span></div>
+    <div class="tt-row hl"><span class="k">% Pop Exposed</span><span class="v">${Math.round(w.riskScore*100)}%</span></div>
     <div class="tt-row"><span class="k">${activeDef.label}</span><span class="v">${activeVal}</span></div>
     <div class="tt-row"><span class="k">Rainfall</span><span class="v">${w.rainfall.toFixed(2)}</span></div>
   `;
